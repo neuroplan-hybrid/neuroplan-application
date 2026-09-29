@@ -1,0 +1,484 @@
+pipeline {
+    agent any
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        APP_DIR = 'neuroplan-login-mvp'
+
+        AWS_REGION   = 'ap-northeast-2'
+        ECR_REGISTRY = '707191185613.dkr.ecr.ap-northeast-2.amazonaws.com'
+
+        FRONTEND_IMAGE = '707191185613.dkr.ecr.ap-northeast-2.amazonaws.com/neuroplan-frontend'
+        BACKEND_IMAGE  = '707191185613.dkr.ecr.ap-northeast-2.amazonaws.com/neuroplan-backend'
+
+        GITOPS_REPO_SSH = 'git@github.com:neuroplan-hybrid/neuroplan-gitops.git'
+        GITOPS_DIR      = '.gitops'
+
+        KUSTOMIZATION_ROSA =
+            '.gitops/overlays/rosa/kustomization.yaml'
+
+        KUSTOMIZATION_ONPREM_DR =
+            '.gitops/overlays/onprem-dr/kustomization.yaml'
+    }
+
+    stages {
+
+        stage('Checkout Application') {
+            steps {
+                script {
+                    def scmVars = checkout scm
+
+                    env.GIT_COMMIT_FULL = scmVars.GIT_COMMIT
+
+                    env.GIT_PREVIOUS_COMMIT_RESOLVED =
+                        scmVars.GIT_PREVIOUS_COMMIT ?: ''
+
+                    env.IMAGE_TAG = sh(
+                        script: 'git rev-parse --short=7 HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Commit    : ${env.GIT_COMMIT_FULL}"
+                    echo "Image Tag : ${env.IMAGE_TAG}"
+                }
+            }
+        }
+
+
+        stage('Detect Changes') {
+            steps {
+                script {
+                    def prev =
+                        env.GIT_PREVIOUS_COMMIT_RESOLVED ?: ''
+
+                    /*
+                     * 첫 Jenkins 실행은 ECR에 초기 이미지를
+                     * 반드시 생성해야 하므로 둘 다 Build한다.
+                     */
+                    if (!prev ||
+                        sh(
+                            script:
+                                "git cat-file -e '${prev}^{commit}' 2>/dev/null",
+                            returnStatus: true
+                        ) != 0) {
+
+                        echo "First build: build both images."
+
+                        env.FRONTEND_CHANGED = 'true'
+                        env.BACKEND_CHANGED  = 'true'
+
+                    } else {
+
+                        def changedFiles = sh(
+                            script: """
+                                git diff --name-only \
+                                  '${prev}' \
+                                  '${env.GIT_COMMIT_FULL}'
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        echo "Changed files:"
+                        echo changedFiles ?: "(none)"
+
+                        def files = changedFiles
+                            ? changedFiles.split('\n')
+                            : []
+
+                        env.FRONTEND_CHANGED = files.any {
+                            it.startsWith(
+                                'neuroplan-login-mvp/frontend/'
+                            )
+                        }.toString()
+
+                        env.BACKEND_CHANGED = files.any {
+                            it.startsWith(
+                                'neuroplan-login-mvp/backend/'
+                            )
+                        }.toString()
+                    }
+
+                    echo "Frontend changed : ${env.FRONTEND_CHANGED}"
+                    echo "Backend changed  : ${env.BACKEND_CHANGED}"
+                }
+            }
+        }
+
+
+        stage('Test Backend') {
+            when {
+                expression {
+                    env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                dir("${APP_DIR}/backend") {
+                    sh '''
+                        set -eu
+                        mvn -B -ntp test
+                    '''
+                }
+            }
+        }
+
+
+        stage('ECR Login') {
+            when {
+                expression {
+                    env.FRONTEND_CHANGED == 'true' ||
+                    env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jenkins-ecr-aws',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        aws ecr get-login-password \
+                          --region "$AWS_REGION" \
+                        | docker login \
+                          --username AWS \
+                          --password-stdin "$ECR_REGISTRY"
+                    '''
+                }
+            }
+        }
+
+
+        stage('Build Frontend') {
+            when {
+                expression {
+                    env.FRONTEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    docker build \
+                      -f "$APP_DIR/frontend/Dockerfile.aws" \
+                      -t "$FRONTEND_IMAGE:$IMAGE_TAG" \
+                      "$APP_DIR/frontend"
+                '''
+            }
+        }
+
+
+        stage('Push Frontend') {
+            when {
+                expression {
+                    env.FRONTEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                sh '''
+                    set -eu
+                    docker push "$FRONTEND_IMAGE:$IMAGE_TAG"
+                '''
+            }
+        }
+
+
+        stage('Build Backend') {
+            when {
+                expression {
+                    env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    docker build \
+                      -f "$APP_DIR/backend/Dockerfile" \
+                      -t "$BACKEND_IMAGE:$IMAGE_TAG" \
+                      "$APP_DIR/backend"
+                '''
+            }
+        }
+
+
+        stage('Push Backend') {
+            when {
+                expression {
+                    env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                sh '''
+                    set -eu
+                    docker push "$BACKEND_IMAGE:$IMAGE_TAG"
+                '''
+            }
+        }
+
+
+        stage('Checkout GitOps') {
+            when {
+                expression {
+                    env.FRONTEND_CHANGED == 'true' ||
+                    env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'neuroplan-gitops-ssh',
+                        keyFileVariable: 'GITOPS_REPO_KEY',
+                        usernameVariable: 'GITOPS_REPO_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        rm -rf "$GITOPS_DIR"
+
+                        export GIT_SSH_COMMAND="ssh \
+                          -i $GITOPS_REPO_KEY \
+                          -o IdentitiesOnly=yes \
+                          -o StrictHostKeyChecking=accept-new"
+
+                        git clone \
+                          --branch main \
+                          "$GITOPS_REPO_SSH" \
+                          "$GITOPS_DIR"
+                    '''
+                }
+            }
+        }
+
+
+        stage('Update GitOps Image Tags') {
+            when {
+                expression {
+                    env.FRONTEND_CHANGED == 'true' ||
+                    env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    python3 <<'PY'
+import os
+from pathlib import Path
+
+paths = [
+    Path(os.environ["KUSTOMIZATION_ROSA"]),
+    Path(os.environ["KUSTOMIZATION_ONPREM_DR"]),
+]
+
+tag = os.environ["IMAGE_TAG"]
+
+targets = []
+
+if os.environ["FRONTEND_CHANGED"] == "true":
+    targets.append(os.environ["FRONTEND_IMAGE"])
+
+if os.environ["BACKEND_CHANGED"] == "true":
+    targets.append(os.environ["BACKEND_IMAGE"])
+
+for path in paths:
+    lines = path.read_text().splitlines()
+
+    for image in targets:
+        found = False
+
+        for i, line in enumerate(lines):
+            if line.strip() == f"newName: {image}":
+
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    if lines[j].strip().startswith("newTag:"):
+                        indent = lines[j][
+                            :len(lines[j]) - len(lines[j].lstrip())
+                        ]
+
+                        lines[j] = f'{indent}newTag: "{tag}"'
+                        found = True
+                        break
+
+                break
+
+        if not found:
+            raise SystemExit(
+                f"newTag entry not found for image: {image} in {path}"
+            )
+
+    path.write_text(chr(10).join(lines) + chr(10))
+PY
+
+                    echo "ROSA:"
+                    grep -A2 'newName:' \
+                      "$KUSTOMIZATION_ROSA"
+
+                    echo
+                    echo "On-Prem DR:"
+                    grep -A2 'newName:' \
+                      "$KUSTOMIZATION_ONPREM_DR"
+                '''
+            }
+        }
+
+
+        stage('Validate GitOps') {
+            when {
+                expression {
+                    env.FRONTEND_CHANGED == 'true' ||
+                    env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    kubectl kustomize \
+                      "$GITOPS_DIR/overlays/rosa" \
+                      > /tmp/neuroplan-rosa-rendered.yaml
+
+                    kubectl kustomize \
+                      "$GITOPS_DIR/overlays/onprem-dr" \
+                      > /tmp/neuroplan-onprem-dr-rendered.yaml
+
+                    if [ "$FRONTEND_CHANGED" = "true" ]; then
+                        grep -q \
+                          "image: $FRONTEND_IMAGE:$IMAGE_TAG" \
+                          /tmp/neuroplan-rosa-rendered.yaml
+
+                        grep -q \
+                          "image: $FRONTEND_IMAGE:$IMAGE_TAG" \
+                          /tmp/neuroplan-onprem-dr-rendered.yaml
+                    fi
+
+                    if [ "$BACKEND_CHANGED" = "true" ]; then
+                        grep -q \
+                          "image: $BACKEND_IMAGE:$IMAGE_TAG" \
+                          /tmp/neuroplan-rosa-rendered.yaml
+
+                        grep -q \
+                          "image: $BACKEND_IMAGE:$IMAGE_TAG" \
+                          /tmp/neuroplan-onprem-dr-rendered.yaml
+                    fi
+
+                    echo "[PASS] GitOps manifests validated"
+                '''
+            }
+        }
+
+
+        stage('Commit GitOps Change') {
+            when {
+                expression {
+                    env.FRONTEND_CHANGED == 'true' ||
+                    env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'neuroplan-gitops-ssh',
+                        keyFileVariable: 'GITOPS_REPO_KEY',
+                        usernameVariable: 'GITOPS_REPO_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        cd "$GITOPS_DIR"
+
+                        if git diff --quiet -- \
+                          overlays/rosa/kustomization.yaml \
+                          overlays/onprem-dr/kustomization.yaml; then
+                            echo "No GitOps changes to commit."
+                            exit 0
+                        fi
+
+                        git config user.name "NeuroPlan Jenkins"
+                        git config user.email "jenkins@nplan.local"
+
+                        git add \
+                          overlays/rosa/kustomization.yaml \
+                          overlays/onprem-dr/kustomization.yaml
+
+                        git commit \
+                          -m "ci: deploy image $IMAGE_TAG"
+
+                        export GIT_SSH_COMMAND="ssh \
+                          -i $GITOPS_REPO_KEY \
+                          -o IdentitiesOnly=yes \
+                          -o StrictHostKeyChecking=accept-new"
+
+                        for attempt in 1 2 3; do
+                            if git push origin HEAD:main; then
+                                exit 0
+                            fi
+
+                            if [ "$attempt" -eq 3 ]; then
+                                break
+                            fi
+
+                            echo "GitOps push failed (attempt ${attempt}/3)."
+                            echo "Fetching latest main and rebasing before retry..."
+
+                            git fetch origin main
+
+                            if ! git rebase origin/main; then
+                                git rebase --abort || true
+                                echo "GitOps rebase conflict requires manual resolution."
+                                exit 1
+                            fi
+
+                            sleep $((attempt * 2))
+                        done
+
+                        echo "GitOps push failed after 3 attempts."
+                        exit 1
+                    '''
+                }
+            }
+        }
+    }
+
+
+    post {
+        success {
+            echo "NeuroPlan AWS CI pipeline completed successfully."
+        }
+
+        failure {
+            echo "NeuroPlan AWS CI pipeline failed."
+        }
+
+        always {
+            sh '''
+                docker logout "$ECR_REGISTRY" >/dev/null 2>&1 || true
+
+                rm -rf "$GITOPS_DIR"
+
+                rm -f \
+                  /tmp/neuroplan-rosa-rendered.yaml \
+                  /tmp/neuroplan-onprem-dr-rendered.yaml \
+                  || true
+            '''
+        }
+    }
+}
