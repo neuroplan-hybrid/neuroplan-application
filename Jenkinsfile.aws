@@ -9,11 +9,15 @@ pipeline {
     environment {
         APP_DIR = 'neuroplan-login-mvp'
 
-        AWS_REGION   = 'ap-northeast-2'
-        ECR_REGISTRY = '707191185613.dkr.ecr.ap-northeast-2.amazonaws.com'
+        AWS_REGION = 'ap-northeast-2'
 
-        FRONTEND_IMAGE = '707191185613.dkr.ecr.ap-northeast-2.amazonaws.com/neuroplan-frontend'
-        BACKEND_IMAGE  = '707191185613.dkr.ecr.ap-northeast-2.amazonaws.com/neuroplan-backend'
+        ECR_FRONTEND_REPOSITORY = 'neuroplan-frontend'
+        ECR_BACKEND_REPOSITORY  = 'neuroplan-backend'
+
+        AWS_ACCOUNT_ID = ''
+        ECR_REGISTRY   = ''
+        FRONTEND_IMAGE = ''
+        BACKEND_IMAGE  = ''
 
         GITOPS_REPO_SSH = 'git@github.com:neuroplan-hybrid/neuroplan-gitops.git'
         GITOPS_DIR      = '.gitops'
@@ -45,6 +49,47 @@ pipeline {
 
                     echo "Commit    : ${env.GIT_COMMIT_FULL}"
                     echo "Image Tag : ${env.IMAGE_TAG}"
+                }
+            }
+        }
+
+
+        stage('Resolve AWS Context') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jenkins-ecr-aws',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    script {
+                        env.AWS_ACCOUNT_ID = sh(
+                            script: '''
+                                set -eu
+                                aws sts get-caller-identity \
+                                  --query Account \
+                                  --output text
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        if (!(env.AWS_ACCOUNT_ID ==~ /[0-9]{12}/)) {
+                            error("Invalid AWS account ID returned by STS")
+                        }
+
+                        env.ECR_REGISTRY =
+                            "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+
+                        env.FRONTEND_IMAGE =
+                            "${env.ECR_REGISTRY}/${env.ECR_FRONTEND_REPOSITORY}"
+
+                        env.BACKEND_IMAGE =
+                            "${env.ECR_REGISTRY}/${env.ECR_BACKEND_REPOSITORY}"
+
+                        echo "AWS Region   : ${env.AWS_REGION}"
+                        echo "ECR Registry : ${env.ECR_REGISTRY}"
+                    }
                 }
             }
         }
@@ -153,7 +198,7 @@ pipeline {
                                 script: '''
                                     aws ecr describe-images \
                                       --region "$AWS_REGION" \
-                                      --repository-name "${FRONTEND_IMAGE##*/}" \
+                                      --repository-name "$ECR_FRONTEND_REPOSITORY" \
                                       --image-ids "imageTag=$IMAGE_TAG" \
                                       >/dev/null 2>&1
                                 ''',
@@ -169,7 +214,7 @@ pipeline {
                                 script: '''
                                     aws ecr describe-images \
                                       --region "$AWS_REGION" \
-                                      --repository-name "${BACKEND_IMAGE##*/}" \
+                                      --repository-name "$ECR_BACKEND_REPOSITORY" \
                                       --image-ids "imageTag=$IMAGE_TAG" \
                                       >/dev/null 2>&1
                                 ''',
@@ -295,6 +340,60 @@ pipeline {
                     set -eu
                     docker push "$BACKEND_IMAGE:$IMAGE_TAG"
                 '''
+            }
+        }
+
+
+        stage('Verify ECR Images') {
+            when {
+                expression {
+                    env.FRONTEND_CHANGED == 'true' ||
+                    env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jenkins-ecr-aws',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        verify_image() {
+                            repo="$1"
+                            label="$2"
+
+                            digest="$(
+                                aws ecr describe-images \
+                                  --region "$AWS_REGION" \
+                                  --repository-name "$repo" \
+                                  --image-ids "imageTag=$IMAGE_TAG" \
+                                  --query 'imageDetails[0].imageDigest' \
+                                  --output text
+                            )"
+
+                            if [ -z "$digest" ] || [ "$digest" = "None" ]; then
+                                echo "[FAIL] $label image not found in ECR: $repo:$IMAGE_TAG"
+                                exit 1
+                            fi
+
+                            echo "[PASS] $label image verified in ECR: $repo:$IMAGE_TAG"
+                            echo "       digest=$digest"
+                        }
+
+                        if [ "$FRONTEND_CHANGED" = "true" ]; then
+                            verify_image "$ECR_FRONTEND_REPOSITORY" "Frontend"
+                        fi
+
+                        if [ "$BACKEND_CHANGED" = "true" ]; then
+                            verify_image "$ECR_BACKEND_REPOSITORY" "Backend"
+                        fi
+                    '''
+                }
             }
         }
 
@@ -540,7 +639,9 @@ PY
 
         always {
             sh '''
-                docker logout "$ECR_REGISTRY" >/dev/null 2>&1 || true
+                if [ -n "$ECR_REGISTRY" ]; then
+                    docker logout "$ECR_REGISTRY" >/dev/null 2>&1 || true
+                fi
 
                 rm -rf "$GITOPS_DIR"
 
