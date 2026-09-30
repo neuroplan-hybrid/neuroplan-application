@@ -14,10 +14,6 @@ pipeline {
         ECR_FRONTEND_REPOSITORY = 'neuroplan-frontend'
         ECR_BACKEND_REPOSITORY  = 'neuroplan-backend'
 
-        AWS_ACCOUNT_ID = ''
-        ECR_REGISTRY   = ''
-        FRONTEND_IMAGE = ''
-        BACKEND_IMAGE  = ''
 
         GITOPS_REPO_SSH = 'git@github.com:neuroplan-hybrid/neuroplan-gitops.git'
         GITOPS_DIR      = '.gitops'
@@ -64,7 +60,7 @@ pipeline {
                     )
                 ]) {
                     script {
-                        def accountId = sh(
+                        env.AWS_ACCOUNT_ID = "${sh(
                             script: '''
                                 set -eu
 
@@ -90,12 +86,10 @@ pipeline {
                                 printf '%s' "$account_id"
                             ''',
                             returnStdout: true
-                        ).trim()
-
-                        env.AWS_ACCOUNT_ID = accountId
+                        ).trim()}"
 
                         env.ECR_REGISTRY =
-                            "${accountId}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+                            "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
 
                         env.FRONTEND_IMAGE =
                             "${env.ECR_REGISTRY}/${env.ECR_FRONTEND_REPOSITORY}"
