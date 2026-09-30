@@ -34,8 +34,9 @@ pipeline {
 
                     env.GIT_COMMIT_FULL = scmVars.GIT_COMMIT
 
-                    env.GIT_PREVIOUS_COMMIT_RESOLVED =
-                        scmVars.GIT_PREVIOUS_COMMIT ?: ''
+                    env.GIT_PREVIOUS_SUCCESSFUL_COMMIT_RESOLVED =
+                        scmVars.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?:
+                        env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: ''
 
                     env.IMAGE_TAG = sh(
                         script: 'git rev-parse --short=7 HEAD',
@@ -53,7 +54,7 @@ pipeline {
             steps {
                 script {
                     def prev =
-                        env.GIT_PREVIOUS_COMMIT_RESOLVED ?: ''
+                        env.GIT_PREVIOUS_SUCCESSFUL_COMMIT_RESOLVED ?: ''
 
                     /*
                      * 첫 Jenkins 실행은 ECR에 초기 이미지를
@@ -102,6 +103,9 @@ pipeline {
                         }.toString()
                     }
 
+                    env.FRONTEND_IMAGE_EXISTS = 'false'
+                    env.BACKEND_IMAGE_EXISTS  = 'false'
+
                     echo "Frontend changed : ${env.FRONTEND_CHANGED}"
                     echo "Backend changed  : ${env.BACKEND_CHANGED}"
                 }
@@ -127,11 +131,73 @@ pipeline {
         }
 
 
-        stage('ECR Login') {
+        stage('Check Existing ECR Images') {
             when {
                 expression {
                     env.FRONTEND_CHANGED == 'true' ||
                     env.BACKEND_CHANGED == 'true'
+                }
+            }
+
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jenkins-ecr-aws',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    script {
+                        if (env.FRONTEND_CHANGED == 'true') {
+                            def frontendStatus = sh(
+                                script: '''
+                                    aws ecr describe-images \
+                                      --region "$AWS_REGION" \
+                                      --repository-name "${FRONTEND_IMAGE##*/}" \
+                                      --image-ids "imageTag=$IMAGE_TAG" \
+                                      >/dev/null 2>&1
+                                ''',
+                                returnStatus: true
+                            )
+
+                            env.FRONTEND_IMAGE_EXISTS =
+                                (frontendStatus == 0).toString()
+                        }
+
+                        if (env.BACKEND_CHANGED == 'true') {
+                            def backendStatus = sh(
+                                script: '''
+                                    aws ecr describe-images \
+                                      --region "$AWS_REGION" \
+                                      --repository-name "${BACKEND_IMAGE##*/}" \
+                                      --image-ids "imageTag=$IMAGE_TAG" \
+                                      >/dev/null 2>&1
+                                ''',
+                                returnStatus: true
+                            )
+
+                            env.BACKEND_IMAGE_EXISTS =
+                                (backendStatus == 0).toString()
+                        }
+
+                        echo "Frontend image exists : ${env.FRONTEND_IMAGE_EXISTS}"
+                        echo "Backend image exists  : ${env.BACKEND_IMAGE_EXISTS}"
+                    }
+                }
+            }
+        }
+
+
+        stage('ECR Login') {
+            when {
+                expression {
+                    (
+                        env.FRONTEND_CHANGED == 'true' &&
+                        env.FRONTEND_IMAGE_EXISTS != 'true'
+                    ) || (
+                        env.BACKEND_CHANGED == 'true' &&
+                        env.BACKEND_IMAGE_EXISTS != 'true'
+                    )
                 }
             }
 
@@ -160,7 +226,8 @@ pipeline {
         stage('Build Frontend') {
             when {
                 expression {
-                    env.FRONTEND_CHANGED == 'true'
+                    env.FRONTEND_CHANGED == 'true' &&
+                    env.FRONTEND_IMAGE_EXISTS != 'true'
                 }
             }
 
@@ -180,7 +247,8 @@ pipeline {
         stage('Push Frontend') {
             when {
                 expression {
-                    env.FRONTEND_CHANGED == 'true'
+                    env.FRONTEND_CHANGED == 'true' &&
+                    env.FRONTEND_IMAGE_EXISTS != 'true'
                 }
             }
 
@@ -196,7 +264,8 @@ pipeline {
         stage('Build Backend') {
             when {
                 expression {
-                    env.BACKEND_CHANGED == 'true'
+                    env.BACKEND_CHANGED == 'true' &&
+                    env.BACKEND_IMAGE_EXISTS != 'true'
                 }
             }
 
@@ -216,7 +285,8 @@ pipeline {
         stage('Push Backend') {
             when {
                 expression {
-                    env.BACKEND_CHANGED == 'true'
+                    env.BACKEND_CHANGED == 'true' &&
+                    env.BACKEND_IMAGE_EXISTS != 'true'
                 }
             }
 
@@ -352,30 +422,30 @@ PY
 
                     kubectl kustomize \
                       "$GITOPS_DIR/overlays/rosa" \
-                      > /tmp/neuroplan-rosa-rendered.yaml
+                      > "$WORKSPACE/.ci-neuroplan-rosa-rendered.yaml"
 
                     kubectl kustomize \
                       "$GITOPS_DIR/overlays/onprem-dr" \
-                      > /tmp/neuroplan-onprem-dr-rendered.yaml
+                      > "$WORKSPACE/.ci-neuroplan-onprem-dr-rendered.yaml"
 
                     if [ "$FRONTEND_CHANGED" = "true" ]; then
                         grep -q \
                           "image: $FRONTEND_IMAGE:$IMAGE_TAG" \
-                          /tmp/neuroplan-rosa-rendered.yaml
+                          "$WORKSPACE/.ci-neuroplan-rosa-rendered.yaml"
 
                         grep -q \
                           "image: $FRONTEND_IMAGE:$IMAGE_TAG" \
-                          /tmp/neuroplan-onprem-dr-rendered.yaml
+                          "$WORKSPACE/.ci-neuroplan-onprem-dr-rendered.yaml"
                     fi
 
                     if [ "$BACKEND_CHANGED" = "true" ]; then
                         grep -q \
                           "image: $BACKEND_IMAGE:$IMAGE_TAG" \
-                          /tmp/neuroplan-rosa-rendered.yaml
+                          "$WORKSPACE/.ci-neuroplan-rosa-rendered.yaml"
 
                         grep -q \
                           "image: $BACKEND_IMAGE:$IMAGE_TAG" \
-                          /tmp/neuroplan-onprem-dr-rendered.yaml
+                          "$WORKSPACE/.ci-neuroplan-onprem-dr-rendered.yaml"
                     fi
 
                     echo "[PASS] GitOps manifests validated"
@@ -475,8 +545,8 @@ PY
                 rm -rf "$GITOPS_DIR"
 
                 rm -f \
-                  /tmp/neuroplan-rosa-rendered.yaml \
-                  /tmp/neuroplan-onprem-dr-rendered.yaml \
+                  "$WORKSPACE/.ci-neuroplan-rosa-rendered.yaml" \
+                  "$WORKSPACE/.ci-neuroplan-onprem-dr-rendered.yaml" \
                   || true
             '''
         }
