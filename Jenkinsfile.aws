@@ -147,7 +147,7 @@ pipeline {
                         echo changedFiles ?: "(none)"
 
                         def files = changedFiles
-                            ? changedFiles.split('\\n')
+                            ? changedFiles.split('\n')
                             : []
 
                         env.FRONTEND_CHANGED = files.any {
