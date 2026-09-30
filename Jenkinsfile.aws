@@ -67,16 +67,30 @@ pipeline {
                         env.AWS_ACCOUNT_ID = sh(
                             script: '''
                                 set -eu
-                                aws sts get-caller-identity \
-                                  --query Account \
-                                  --output text
+
+                                account_id="$(
+                                    aws sts get-caller-identity \
+                                      --query Account \
+                                      --output text \
+                                    | tr -d '[:space:]'
+                                )"
+
+                                case "$account_id" in
+                                    ''|*[!0-9]*)
+                                        echo "Invalid AWS account ID returned by STS" >&2
+                                        exit 1
+                                        ;;
+                                esac
+
+                                if [ "${#account_id}" -ne 12 ]; then
+                                    echo "Invalid AWS account ID length returned by STS" >&2
+                                    exit 1
+                                fi
+
+                                printf '%s' "$account_id"
                             ''',
                             returnStdout: true
                         ).trim()
-
-                        if (!(env.AWS_ACCOUNT_ID ==~ /[0-9]{12}/)) {
-                            error("Invalid AWS account ID returned by STS")
-                        }
 
                         env.ECR_REGISTRY =
                             "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
@@ -87,6 +101,7 @@ pipeline {
                         env.BACKEND_IMAGE =
                             "${env.ECR_REGISTRY}/${env.ECR_BACKEND_REPOSITORY}"
 
+                        echo "AWS Account ID: ${env.AWS_ACCOUNT_ID}"
                         echo "AWS Region   : ${env.AWS_REGION}"
                         echo "ECR Registry : ${env.ECR_REGISTRY}"
                     }
