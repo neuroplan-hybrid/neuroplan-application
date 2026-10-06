@@ -65,6 +65,9 @@ management:
       group:
         readiness:
           include: readinessState,db,deploymentSafety
+        # Route 53 전환 판단용: DB 장애는 전환 원인에서 제외한다.
+        routing:
+          include: livenessState,deploymentSafety
   metrics:
     distribution:
       percentiles-histogram:
