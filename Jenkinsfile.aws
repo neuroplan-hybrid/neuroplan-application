@@ -23,6 +23,15 @@ pipeline {
 
         KUSTOMIZATION_ONPREM_DR =
             '.gitops/overlays/onprem-dr/kustomization.yaml'
+
+        ONPREM_KUBECONFIG =
+            '/var/lib/jenkins/.kube/config'
+
+        ONPREM_NAMESPACE =
+            'application'
+
+        ONPREM_ECR_PULL_SECRET =
+            'ecr-pull-secret'
     }
 
     stages {
@@ -405,6 +414,126 @@ pipeline {
                         if [ "$BACKEND_CHANGED" = "true" ]; then
                             verify_image "$ECR_BACKEND_REPOSITORY" "Backend"
                         fi
+                    '''
+                }
+            }
+        }
+
+
+        stage('Refresh On-Prem ECR Pull Secret') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jenkins-ecr-aws',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        if [ ! -f "$ONPREM_KUBECONFIG" ]; then
+                            echo "[FAIL] Jenkins On-Prem kubeconfig not found." >&2
+                            exit 1
+                        fi
+
+                        # Secret이 없으면 Jenkins가 새로 생성하지 않고 실패
+                        /usr/local/bin/kubectl \
+                          --kubeconfig "$ONPREM_KUBECONFIG" \
+                          -n "$ONPREM_NAMESPACE" \
+                          get secret "$ONPREM_ECR_PULL_SECRET" \
+                          >/dev/null
+
+                        # AWS ECR 인증 토큰 발급
+                        ecr_password="$(
+                            aws ecr get-login-password \
+                              --region "$AWS_REGION"
+                        )"
+
+                        if [ -z "$ecr_password" ]; then
+                            echo "[FAIL] Empty ECR authorization password." >&2
+                            exit 1
+                        fi
+
+                        secret_json="$(mktemp)"
+                        patch_json="$(mktemp)"
+
+                        cleanup() {
+                            rm -f "$secret_json" "$patch_json"
+                            unset ecr_password
+                        }
+
+                        trap cleanup EXIT HUP INT TERM
+
+                        # 실제 생성은 하지 않고 로컬에서
+                        # dockerconfigjson 데이터만 생성
+                        /usr/local/bin/kubectl \
+                          create secret docker-registry \
+                          "$ONPREM_ECR_PULL_SECRET" \
+                          --namespace "$ONPREM_NAMESPACE" \
+                          --docker-server="$ECR_REGISTRY" \
+                          --docker-username=AWS \
+                          --docker-password="$ecr_password" \
+                          --dry-run=client \
+                          -o json \
+                          > "$secret_json"
+
+                        python3 - "$secret_json" "$patch_json" <<'PYJSON'
+import json
+import sys
+
+source_path = sys.argv[1]
+patch_path = sys.argv[2]
+
+with open(source_path, "r", encoding="utf-8") as f:
+    source = json.load(f)
+
+dockerconfig = source.get("data", {}).get(".dockerconfigjson")
+
+if not dockerconfig:
+    raise SystemExit(
+        "[FAIL] .dockerconfigjson was not generated"
+    )
+
+patch = {
+    "data": {
+        ".dockerconfigjson": dockerconfig
+    },
+    "type": "kubernetes.io/dockerconfigjson"
+}
+
+with open(patch_path, "w", encoding="utf-8") as f:
+    json.dump(patch, f)
+PYJSON
+
+                        # 기존 ecr-pull-secret의 data만 갱신
+                        /usr/local/bin/kubectl \
+                          --kubeconfig "$ONPREM_KUBECONFIG" \
+                          -n "$ONPREM_NAMESPACE" \
+                          patch secret "$ONPREM_ECR_PULL_SECRET" \
+                          --type=merge \
+                          --patch-file="$patch_json" \
+                          >/dev/null
+
+                        # 갱신 결과 확인
+                        secret_type="$(
+                            /usr/local/bin/kubectl \
+                              --kubeconfig "$ONPREM_KUBECONFIG" \
+                              -n "$ONPREM_NAMESPACE" \
+                              get secret "$ONPREM_ECR_PULL_SECRET" \
+                              -o 'jsonpath={.type}'
+                        )"
+
+                        if [ "$secret_type" != "kubernetes.io/dockerconfigjson" ]; then
+                            echo "[FAIL] Invalid ECR pull Secret type: $secret_type" >&2
+                            exit 1
+                        fi
+
+                        echo "[PASS] On-Prem ECR pull Secret refreshed."
+                        echo "       namespace=$ONPREM_NAMESPACE"
+                        echo "       secret=$ONPREM_ECR_PULL_SECRET"
+                        echo "       registry=$ECR_REGISTRY"
                     '''
                 }
             }
