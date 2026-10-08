@@ -308,23 +308,24 @@ DevOps VM에서 빌드 스크립트를 수동 실행할 때는 Jenkins Credentia
 
 ## 4. DB/JWT Secret 생성
 
-실제 비밀번호와 JWT 서명키를 Git/YAML에 저장하지 않습니다. 스크립트는 DB 비밀번호를 숨김 입력으로 받고 `openssl rand -base64 48`로 JWT 키를 생성합니다.
+현재 On-Prem `application/neuroplan-auth-secrets`는 기존 배포용 Secret이며, 이 절의 두 스크립트는 **ROSA Namespace `neuroplan` 전용**입니다. On-Prem Secret을 재생성하거나 갱신하는 용도로 실행하지 않습니다.
 
-```bash
-cd ~/onprem-k8s
-./neuroplan-login-mvp/scripts/00-create-db-secret.sh
-```
+ROSA 최초 생성 스크립트는 DB 비밀번호를 숨김 입력으로 받고, 기존 On-Prem JWT 키를 보호된 환경변수로 전달받아 같은 서명 키를 사용합니다. 기존 ROSA Secret이 있으면 덮어쓰지 않고 중단합니다.
 
-생성 리소스:
+RDS Cutover처럼 DB 접속 정보만 바꾸는 작업에는 최초 생성 스크립트를 재실행하지 않습니다. `01-update-db-secret.sh`가 DB_USERNAME·DB_PASSWORD 두 필드만 patch하고 JWT 키가 유지되는지 검증합니다.
 
-```text
-application/neuroplan-auth-secrets
-  DB_USERNAME
-  DB_PASSWORD
-  JWT_SECRET_BASE64
-```
+### ROSA DB Secret 안전 절차
 
-재실행하면 JWT 키도 바뀌어 기존 로그인이 모두 무효화됩니다. 일반 배포 때는 재실행하지 않고 키 교체 작업으로만 사용합니다.
+ROSA 전환용 `00-create-db-secret.sh`와 `01-update-db-secret.sh`은 기본 Namespace나 현재 Kubernetes context를 사용하지 않는다. 두 스크립트 모두 `KUBE_CONTEXT`, `NAMESPACE=neuroplan`, `ROSA_TARGET_CONFIRM=true`를 명시하지 않으면 중단한다.
+
+`00-create-db-secret.sh`은 대상 Secret이 이미 있으면 덮어쓰지 않고 중단한다. ROSA 최초 생성에서는 기존 On-Prem JWT 키를 `JWT_SECRET_BASE64` 환경변수로 전달해야 한다. 새 JWT 생성은 격리된 신규 환경에서만 `ALLOW_NEW_JWT_SECRET=true`로 명시 승인한다.
+
+RDS Cutover 뒤에는 아래 순서를 따른다.
+
+1. ROSA context·Namespace를 확인한다.
+2. `01-update-db-secret.sh`으로 DB_USERNAME·DB_PASSWORD만 갱신하고 JWT 키 보존 결과를 확인한다.
+3. Backend Deployment를 rollout restart하고 완료를 기다린다.
+4. readiness 확인 뒤 로그인·조회·저장 smoke test를 실행한다.
 
 Gemini API Key는 별도의 Secret으로 생성합니다. 실제 값은 명령 기록이나 YAML에 남기지 말고 프롬프트에서 입력합니다.
 
@@ -571,7 +572,21 @@ WHERE id = 1;
 
 ```bash
 oc new-project neuroplan
-NAMESPACE=neuroplan KUBE_CLI=oc ./scripts/00-create-db-secret.sh
+
+# 기존 On-Prem JWT 키는 보호된 환경변수로만 전달한다.
+read -r -s -p "Existing JWT_SECRET_BASE64: " JWT_SECRET_BASE64
+echo
+export JWT_SECRET_BASE64
+
+KUBE_CONTEXT=<ROSA_CONTEXT> NAMESPACE=neuroplan ROSA_TARGET_CONFIRM=true KUBE_CLI=oc \
+  ./scripts/00-create-db-secret.sh
+unset JWT_SECRET_BASE64
+
+# Cutover 뒤 DB 접속 정보만 RDS 값으로 바꾼다.
+KUBE_CONTEXT=<ROSA_CONTEXT> NAMESPACE=neuroplan ROSA_TARGET_CONFIRM=true KUBE_CLI=oc \
+  ./scripts/01-update-db-secret.sh
+oc --context=<ROSA_CONTEXT> -n neuroplan rollout restart deployment/neuroplan-backend
+oc --context=<ROSA_CONTEXT> -n neuroplan rollout status deployment/neuroplan-backend --timeout=180s
 
 cd k8s/rosa
 kustomize edit set image \
