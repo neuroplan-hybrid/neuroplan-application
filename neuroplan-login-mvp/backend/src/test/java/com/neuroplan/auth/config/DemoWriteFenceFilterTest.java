@@ -24,42 +24,54 @@ class DemoWriteFenceFilterTest {
     }
 
     @Test
-    void allowsLoginAndTokenRefreshWhenFenceIsEnabled() throws Exception {
+    void blocksAuthenticationSessionWriteWhenFenceIsEnabled() throws Exception {
         DemoWriteFenceFilter filter = new DemoWriteFenceFilter(true);
-        MockHttpServletRequest login = new MockHttpServletRequest("POST", "/api/auth/login");
-        MockHttpServletRequest refresh = new MockHttpServletRequest("POST", "/api/auth/refresh");
-        AtomicBoolean loginChainCalled = new AtomicBoolean(false);
-        AtomicBoolean refreshChainCalled = new AtomicBoolean(false);
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/auth/login");
+        AtomicBoolean chainCalled = new AtomicBoolean(false);
 
-        filter.doFilter(login, new MockHttpServletResponse(),
-                (ignoredRequest, ignoredResponse) -> loginChainCalled.set(true));
-        filter.doFilter(refresh, new MockHttpServletResponse(),
-                (ignoredRequest, ignoredResponse) -> refreshChainCalled.set(true));
+        filter.doFilter(request, new MockHttpServletResponse(),
+                (ignoredRequest, ignoredResponse) -> chainCalled.set(true));
 
-        assertThat(loginChainCalled).isTrue();
-        assertThat(refreshChainCalled).isTrue();
+        assertThat(chainCalled).isFalse();
     }
 
     @Test
-    void allowsReadRequestWhenFenceIsEnabled() throws Exception {
+    void blocksReadOperationThatPerformsLazyWriteWhenFenceIsEnabled() throws Exception {
         DemoWriteFenceFilter filter = new DemoWriteFenceFilter(true);
-        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/learning/state");
-        MockHttpServletResponse response = new MockHttpServletResponse();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/ai/quota");
         AtomicBoolean chainCalled = new AtomicBoolean(false);
 
-        filter.doFilter(request, response, (ignoredRequest, ignoredResponse) -> chainCalled.set(true));
+        filter.doFilter(request, new MockHttpServletResponse(),
+                (ignoredRequest, ignoredResponse) -> chainCalled.set(true));
 
-        assertThat(chainCalled).isTrue();
+        assertThat(chainCalled).isFalse();
+    }
+
+    @Test
+    void allowsReadOnlyBusinessAndHealthRequestsWhenFenceIsEnabled() throws Exception {
+        DemoWriteFenceFilter filter = new DemoWriteFenceFilter(true);
+        MockHttpServletRequest learningState = new MockHttpServletRequest("GET", "/api/learning/state");
+        MockHttpServletRequest routingHealth = new MockHttpServletRequest("GET", "/actuator/health/routing");
+        AtomicBoolean learningStateChainCalled = new AtomicBoolean(false);
+        AtomicBoolean routingHealthChainCalled = new AtomicBoolean(false);
+
+        filter.doFilter(learningState, new MockHttpServletResponse(),
+                (ignoredRequest, ignoredResponse) -> learningStateChainCalled.set(true));
+        filter.doFilter(routingHealth, new MockHttpServletResponse(),
+                (ignoredRequest, ignoredResponse) -> routingHealthChainCalled.set(true));
+
+        assertThat(learningStateChainCalled).isTrue();
+        assertThat(routingHealthChainCalled).isTrue();
     }
 
     @Test
     void allowsWriteWhenFenceIsDisabled() throws Exception {
         DemoWriteFenceFilter filter = new DemoWriteFenceFilter(false);
         MockHttpServletRequest request = new MockHttpServletRequest("PATCH", "/api/learning/plans/1/steps/1");
-        MockHttpServletResponse response = new MockHttpServletResponse();
         AtomicBoolean chainCalled = new AtomicBoolean(false);
 
-        filter.doFilter(request, response, (ignoredRequest, ignoredResponse) -> chainCalled.set(true));
+        filter.doFilter(request, new MockHttpServletResponse(),
+                (ignoredRequest, ignoredResponse) -> chainCalled.set(true));
 
         assertThat(chainCalled).isTrue();
     }
