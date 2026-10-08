@@ -14,18 +14,16 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * T5 DR 전환 중 ROSA Backend가 기존 Writer에 사용자 데이터를 추가로 기록하지 못하게 한다.
- * 로그인·토큰 갱신·로그아웃은 세션 유지에 필요한 인증 동작이므로 명시적으로 허용한다.
+ * T5 DR 전환 중 ROSA Backend가 기존 Writer에 DB 변경을 추가로 기록하지 못하게 한다.
+ * 인증 API도 세션·쿼터를 기록하므로, Fence가 켜진 동안에는 API 쓰기를 모두 차단한다.
  */
 @Component
 public class DemoWriteFenceFilter extends OncePerRequestFilter {
     private static final Set<String> WRITE_METHODS = Set.of("POST", "PUT", "PATCH", "DELETE");
-    private static final Set<String> AUTH_SESSION_OPERATIONS = Set.of(
-            "POST /api/auth/login",
-            "POST /api/auth/refresh",
-            "POST /api/auth/logout",
-            "POST /api/auth/reauth",
-            "DELETE /api/auth/reauth"
+    // 아래 조회 API는 호출 시 내부에서 계정별 기본 데이터를 upsert한다.
+    private static final Set<String> LAZY_WRITE_READ_OPERATIONS = Set.of(
+            "GET /api/ai/quota",
+            "GET /api/ai/preferences"
     );
 
     private final boolean enabled;
@@ -37,14 +35,11 @@ public class DemoWriteFenceFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
+        String operation = request.getMethod() + " " + path;
         return !enabled
                 || !path.startsWith("/api/")
-                || isAuthenticationSessionOperation(request.getMethod(), path)
-                || !WRITE_METHODS.contains(request.getMethod());
-    }
-
-    private boolean isAuthenticationSessionOperation(String method, String path) {
-        return AUTH_SESSION_OPERATIONS.contains(method + " " + path);
+                || (!WRITE_METHODS.contains(request.getMethod())
+                && !LAZY_WRITE_READ_OPERATIONS.contains(operation));
     }
 
     @Override
@@ -57,7 +52,7 @@ public class DemoWriteFenceFilter extends OncePerRequestFilter {
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.getWriter().write(
                 "{\"status\":503,\"error\":\"Service Unavailable\","
-                        + "\"message\":\"DEMO_WRITE_FENCE is enabled; write requests are temporarily blocked.\"}"
+                        + "\"message\":\"DEMO_WRITE_FENCE is enabled; database-changing requests are temporarily blocked.\"}"
         );
     }
 }
