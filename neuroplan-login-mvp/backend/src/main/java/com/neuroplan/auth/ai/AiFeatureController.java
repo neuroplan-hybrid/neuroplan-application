@@ -69,12 +69,14 @@ public class AiFeatureController {
     private final AiGenerationService generationService;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
+    private final boolean demoWriteFenceEnabled;
 
     public AiFeatureController(JdbcTemplate jdbcTemplate, CurrentUserService currentUserService,
                                AiQuotaService quotaService, AiPreferencesService preferencesService,
                                AiGenerationService generationService,
                                ObjectMapper objectMapper,
-                               PlatformTransactionManager transactionManager) {
+                               PlatformTransactionManager transactionManager,
+                               @org.springframework.beans.factory.annotation.Value("${app.demo-write-fence.enabled:false}") boolean demoWriteFenceEnabled) {
         this.jdbcTemplate = jdbcTemplate;
         this.currentUserService = currentUserService;
         this.quotaService = quotaService;
@@ -82,6 +84,7 @@ public class AiFeatureController {
         this.generationService = generationService;
         this.objectMapper = objectMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.demoWriteFenceEnabled = demoWriteFenceEnabled;
     }
 
     @GetMapping("/quota")
@@ -153,6 +156,10 @@ public class AiFeatureController {
     /** A disabled-by-default, one-subject-per-run problem-bank replenisher. */
     @Scheduled(fixedDelayString = "${app.ai.problem-bank-refill-interval-ms:300000}")
     public void replenishProblemBank() {
+        if (demoWriteFenceEnabled) {
+            log.info("AI problem bank replenishment skipped: DEMO_WRITE_FENCE is enabled");
+            return;
+        }
         try {
             List<ProblemBankSetting> settings = jdbcTemplate.query("""
                     SELECT owner_user_id, target_count
