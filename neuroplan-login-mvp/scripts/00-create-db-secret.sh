@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-NAMESPACE="${NAMESPACE:-application}"
+NAMESPACE="${NAMESPACE:-}"
 SECRET_NAME="${SECRET_NAME:-neuroplan-auth-secrets}"
 KUBE_CLI="${KUBE_CLI:-}"
+KUBE_CONTEXT="${KUBE_CONTEXT:-}"
+ROSA_TARGET_CONFIRM="${ROSA_TARGET_CONFIRM:-}"
 
 if [[ -z "$KUBE_CLI" ]]; then
   if command -v kubectl >/dev/null 2>&1; then KUBE_CLI=kubectl
@@ -12,8 +14,25 @@ if [[ -z "$KUBE_CLI" ]]; then
   fi
 fi
 command -v "$KUBE_CLI" >/dev/null 2>&1 || { echo "[FAIL] $KUBE_CLI not found" >&2; exit 1; }
+[[ -n "$KUBE_CONTEXT" ]] || { echo "[FAIL] KUBE_CONTEXT must explicitly name the ROSA context" >&2; exit 2; }
+[[ "$NAMESPACE" == "neuroplan" ]] || { echo "[FAIL] NAMESPACE must be neuroplan for ROSA Secret operations" >&2; exit 2; }
+[[ "$ROSA_TARGET_CONFIRM" == "true" ]] || { echo "[FAIL] set ROSA_TARGET_CONFIRM=true after confirming the ROSA target" >&2; exit 2; }
+kube() { "$KUBE_CLI" --context="$KUBE_CONTEXT" "$@"; }
+kube config get-contexts "$KUBE_CONTEXT" >/dev/null || { echo "[FAIL] Kubernetes context not found: $KUBE_CONTEXT" >&2; exit 2; }
+echo "[INFO] target context=$KUBE_CONTEXT namespace=$NAMESPACE secret=$SECRET_NAME"
 command -v openssl >/dev/null 2>&1 || { echo "[FAIL] openssl not found" >&2; exit 1; }
-"$KUBE_CLI" get namespace "$NAMESPACE" >/dev/null
+kube get namespace "$NAMESPACE" >/dev/null
+
+secret_lookup="$(kube -n "$NAMESPACE" get secret "$SECRET_NAME" -o name 2>&1)"
+secret_lookup_status=$?
+if [[ "$secret_lookup_status" -eq 0 ]]; then
+  echo "[FAIL] secret ${NAMESPACE}/${SECRET_NAME} already exists; use 01-update-db-secret.sh for DB-only updates" >&2
+  exit 2
+fi
+if [[ "$secret_lookup" != *"(NotFound)"* ]]; then
+  echo "[FAIL] cannot determine whether ${NAMESPACE}/${SECRET_NAME} exists" >&2
+  exit 1
+fi
 
 read -r -p "DB username [ir_app]: " DB_USERNAME
 DB_USERNAME="${DB_USERNAME:-ir_app}"
@@ -44,16 +63,17 @@ if [[ -n "${JWT_SECRET_BASE64:-}" ]]; then
     || { echo "[FAIL] JWT_SECRET_BASE64 must be one line" >&2; exit 2; }
   printf '%s' "$JWT_SECRET_BASE64" >"$SECRET_DIR/JWT_SECRET_BASE64"
 else
+  [[ "${ALLOW_NEW_JWT_SECRET:-}" == "true" ]] \
+    || { echo "[FAIL] JWT_SECRET_BASE64 is required for ROSA Secret creation; set ALLOW_NEW_JWT_SECRET=true only for a brand-new isolated environment" >&2; exit 2; }
   openssl rand -base64 48 | tr -d '\r\n' >"$SECRET_DIR/JWT_SECRET_BASE64"
 fi
 unset JWT_SECRET_BASE64
 
-"$KUBE_CLI" -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
+kube -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
   --from-file=DB_USERNAME="$SECRET_DIR/DB_USERNAME" \
   --from-file=DB_PASSWORD="$SECRET_DIR/DB_PASSWORD" \
-  --from-file=JWT_SECRET_BASE64="$SECRET_DIR/JWT_SECRET_BASE64" \
-  --dry-run=client -o yaml | "$KUBE_CLI" apply -f -
+  --from-file=JWT_SECRET_BASE64="$SECRET_DIR/JWT_SECRET_BASE64" >/dev/null
 
-echo "[PASS] secret ${NAMESPACE}/${SECRET_NAME} created or updated"
-"$KUBE_CLI" -n "$NAMESPACE" get secret "$SECRET_NAME" \
+echo "[PASS] secret ${NAMESPACE}/${SECRET_NAME} created"
+kube -n "$NAMESPACE" get secret "$SECRET_NAME" \
   -o go-template='{{range $k, $v := .data}}{{$k}} {{end}}{{"\n"}}'
