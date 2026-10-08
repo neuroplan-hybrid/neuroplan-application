@@ -52,8 +52,8 @@ app:
   deployment-safety:
     readiness-fail: ${DEMO_READINESS_FAIL:false}
   demo-write-fence:
-    # T5 DR 전환 중 단일 Writer 보장을 위한 ROSA API 쓰기 차단 스위치입니다.
-    # 로그인은 세션 생성이 필요하므로 예외로 유지하며, 기본값은 false입니다.
+    # T5 DR 전환 중 단일 Writer 보장을 위한 ROSA API DB 변경 차단 스위치입니다.
+    # 인증 API와 내부 upsert를 수행하는 조회 API도 차단하며, 기본값은 false입니다.
     enabled: ${DEMO_WRITE_FENCE:false}
 
 management:
