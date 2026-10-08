@@ -23,9 +23,7 @@ echo "[INFO] target context=$KUBE_CONTEXT namespace=$NAMESPACE secret=$SECRET_NA
 command -v openssl >/dev/null 2>&1 || { echo "[FAIL] openssl not found" >&2; exit 1; }
 kube get namespace "$NAMESPACE" >/dev/null
 
-secret_lookup="$(kube -n "$NAMESPACE" get secret "$SECRET_NAME" -o name 2>&1)"
-secret_lookup_status=$?
-if [[ "$secret_lookup_status" -eq 0 ]]; then
+if secret_lookup="$(kube -n "$NAMESPACE" get secret "$SECRET_NAME" -o name 2>&1)"; then
   echo "[FAIL] secret ${NAMESPACE}/${SECRET_NAME} already exists; use 01-update-db-secret.sh for DB-only updates" >&2
   exit 2
 fi
