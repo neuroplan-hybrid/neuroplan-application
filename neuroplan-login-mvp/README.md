@@ -332,6 +332,19 @@ application/neuroplan-auth-secrets
 
 이 스크립트는 기존 `JWT_SECRET_BASE64`가 없으면 중단하며, DB_USERNAME·DB_PASSWORD만 patch한 뒤 JWT 키가 변하지 않았는지 다시 확인합니다. ROSA Namespace에 Secret을 최초 생성할 때는 On-Prem에서 사용 중인 JWT 키를 보호된 환경변수로 전달해 두 환경의 로그인 서명을 동일하게 유지합니다.
 
+### ROSA DB Secret 안전 절차
+
+ROSA 전환용 `00-create-db-secret.sh`와 `01-update-db-secret.sh`은 기본 Namespace나 현재 Kubernetes context를 사용하지 않는다. 두 스크립트 모두 `KUBE_CONTEXT`, `NAMESPACE=neuroplan`, `ROSA_TARGET_CONFIRM=true`를 명시하지 않으면 중단한다.
+
+`00-create-db-secret.sh`은 대상 Secret이 이미 있으면 덮어쓰지 않고 중단한다. ROSA 최초 생성에서는 기존 On-Prem JWT 키를 `JWT_SECRET_BASE64` 환경변수로 전달해야 한다. 새 JWT 생성은 격리된 신규 환경에서만 `ALLOW_NEW_JWT_SECRET=true`로 명시 승인한다.
+
+RDS Cutover 뒤에는 아래 순서를 따른다.
+
+1. ROSA context·Namespace를 확인한다.
+2. `01-update-db-secret.sh`으로 DB_USERNAME·DB_PASSWORD만 갱신하고 JWT 키 보존 결과를 확인한다.
+3. Backend Deployment를 rollout restart하고 완료를 기다린다.
+4. readiness 확인 뒤 로그인·조회·저장 smoke test를 실행한다.
+
 Gemini API Key는 별도의 Secret으로 생성합니다. 실제 값은 명령 기록이나 YAML에 남기지 말고 프롬프트에서 입력합니다.
 
 ```bash
@@ -577,7 +590,21 @@ WHERE id = 1;
 
 ```bash
 oc new-project neuroplan
-NAMESPACE=neuroplan KUBE_CLI=oc ./scripts/00-create-db-secret.sh
+
+# 기존 On-Prem JWT 키는 보호된 환경변수로만 전달한다.
+read -r -s -p "Existing JWT_SECRET_BASE64: " JWT_SECRET_BASE64
+echo
+export JWT_SECRET_BASE64
+
+KUBE_CONTEXT=<ROSA_CONTEXT> NAMESPACE=neuroplan ROSA_TARGET_CONFIRM=true KUBE_CLI=oc \
+  ./scripts/00-create-db-secret.sh
+unset JWT_SECRET_BASE64
+
+# Cutover 뒤 DB 접속 정보만 RDS 값으로 바꾼다.
+KUBE_CONTEXT=<ROSA_CONTEXT> NAMESPACE=neuroplan ROSA_TARGET_CONFIRM=true KUBE_CLI=oc \
+  ./scripts/01-update-db-secret.sh
+oc --context=<ROSA_CONTEXT> -n neuroplan rollout restart deployment/neuroplan-backend
+oc --context=<ROSA_CONTEXT> -n neuroplan rollout status deployment/neuroplan-backend --timeout=180s
 
 cd k8s/rosa
 kustomize edit set image \
