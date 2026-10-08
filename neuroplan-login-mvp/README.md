@@ -308,29 +308,11 @@ DevOps VM에서 빌드 스크립트를 수동 실행할 때는 Jenkins Credentia
 
 ## 4. DB/JWT Secret 생성
 
-실제 비밀번호와 JWT 서명키를 Git/YAML에 저장하지 않습니다. 최초 생성 스크립트는 DB 비밀번호를 숨김 입력으로 받고, 별도 JWT 키를 전달하지 않으면 `openssl rand -base64 48`로 새 키를 생성합니다.
+현재 On-Prem `application/neuroplan-auth-secrets`는 기존 배포용 Secret이며, 이 절의 두 스크립트는 **ROSA Namespace `neuroplan` 전용**입니다. On-Prem Secret을 재생성하거나 갱신하는 용도로 실행하지 않습니다.
 
-```bash
-cd ~/onprem-k8s
-./neuroplan-login-mvp/scripts/00-create-db-secret.sh
-```
+ROSA 최초 생성 스크립트는 DB 비밀번호를 숨김 입력으로 받고, 기존 On-Prem JWT 키를 보호된 환경변수로 전달받아 같은 서명 키를 사용합니다. 기존 ROSA Secret이 있으면 덮어쓰지 않고 중단합니다.
 
-생성 리소스:
-
-```text
-application/neuroplan-auth-secrets
-  DB_USERNAME
-  DB_PASSWORD
-  JWT_SECRET_BASE64
-```
-
-재실행하면 JWT 키도 바뀌어 기존 로그인이 모두 무효화됩니다. 따라서 **RDS 전환처럼 DB 접속 정보만 바꾸는 작업에는 이 스크립트를 재실행하지 않습니다.** 기존 JWT 키를 보존하는 아래 전용 스크립트를 사용합니다.
-
-```bash
-./scripts/01-update-db-secret.sh
-```
-
-이 스크립트는 기존 `JWT_SECRET_BASE64`가 없으면 중단하며, DB_USERNAME·DB_PASSWORD만 patch한 뒤 JWT 키가 변하지 않았는지 다시 확인합니다. ROSA Namespace에 Secret을 최초 생성할 때는 On-Prem에서 사용 중인 JWT 키를 보호된 환경변수로 전달해 두 환경의 로그인 서명을 동일하게 유지합니다.
+RDS Cutover처럼 DB 접속 정보만 바꾸는 작업에는 최초 생성 스크립트를 재실행하지 않습니다. `01-update-db-secret.sh`가 DB_USERNAME·DB_PASSWORD 두 필드만 patch하고 JWT 키가 유지되는지 검증합니다.
 
 ### ROSA DB Secret 안전 절차
 
