@@ -308,7 +308,7 @@ DevOps VM에서 빌드 스크립트를 수동 실행할 때는 Jenkins Credentia
 
 ## 4. DB/JWT Secret 생성
 
-실제 비밀번호와 JWT 서명키를 Git/YAML에 저장하지 않습니다. 스크립트는 DB 비밀번호를 숨김 입력으로 받고 `openssl rand -base64 48`로 JWT 키를 생성합니다.
+실제 비밀번호와 JWT 서명키를 Git/YAML에 저장하지 않습니다. 최초 생성 스크립트는 DB 비밀번호를 숨김 입력으로 받고, 별도 JWT 키를 전달하지 않으면 `openssl rand -base64 48`로 새 키를 생성합니다.
 
 ```bash
 cd ~/onprem-k8s
@@ -324,7 +324,13 @@ application/neuroplan-auth-secrets
   JWT_SECRET_BASE64
 ```
 
-재실행하면 JWT 키도 바뀌어 기존 로그인이 모두 무효화됩니다. 일반 배포 때는 재실행하지 않고 키 교체 작업으로만 사용합니다.
+재실행하면 JWT 키도 바뀌어 기존 로그인이 모두 무효화됩니다. 따라서 **RDS 전환처럼 DB 접속 정보만 바꾸는 작업에는 이 스크립트를 재실행하지 않습니다.** 기존 JWT 키를 보존하는 아래 전용 스크립트를 사용합니다.
+
+```bash
+./scripts/01-update-db-secret.sh
+```
+
+이 스크립트는 기존 `JWT_SECRET_BASE64`가 없으면 중단하며, DB_USERNAME·DB_PASSWORD만 patch한 뒤 JWT 키가 변하지 않았는지 다시 확인합니다. ROSA Namespace에 Secret을 최초 생성할 때는 On-Prem에서 사용 중인 JWT 키를 보호된 환경변수로 전달해 두 환경의 로그인 서명을 동일하게 유지합니다.
 
 Gemini API Key는 별도의 Secret으로 생성합니다. 실제 값은 명령 기록이나 YAML에 남기지 말고 프롬프트에서 입력합니다.
 
