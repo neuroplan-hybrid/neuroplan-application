@@ -18,3 +18,4 @@ ENTRYPOINT ["nginx", "-g", "daemon off;"]
 # CI verification: frontend-only deployment
 
 # CI verification: simultaneous deployment
+# SCM polling test 2026-10-09: frontend-only auto deployment
