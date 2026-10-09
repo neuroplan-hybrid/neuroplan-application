@@ -22,3 +22,4 @@ ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-Djava.io.tmpdir=/tmp", "-jar"
 # CI verification: backend-only deployment
 
 # CI verification: simultaneous deployment
+# SCM polling test 2026-10-09: backend-only auto deployment
